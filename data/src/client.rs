@@ -9,7 +9,7 @@ use anyhow::{Context as ErrorContext, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
 use futures::channel::mpsc;
 use futures::{Future, FutureExt};
-use irc::proto::{self, Command, command};
+use irc::proto::{self, command, tags, Command};
 use itertools::{Either, Itertools};
 use log::error;
 use tokio::fs;
@@ -221,6 +221,13 @@ impl Client {
     }
 
     fn quit(&mut self, reason: Option<String>) {
+        self.who_polls.retain(|who_poll| {
+            matches!(
+                who_poll.status,
+                WhoStatus::Requested(_, _, _) | WhoStatus::Receiving(_, _)
+            )
+        });
+
         if let Err(e) = if let Some(reason) = reason {
             self.handle.try_send(command!("QUIT", reason))
         } else {
@@ -312,18 +319,13 @@ impl Client {
         mut message: message::Encoded,
     ) {
         if self.supports_labels {
-            use proto::Tag;
-
             let label = generate_label();
             let context = Context::new(&message, buffer.clone());
 
             self.labels.insert(label.clone(), context);
 
             // IRC: Encode tags
-            message.tags = vec![Tag {
-                key: "label".to_string(),
-                value: Some(label),
-            }];
+            message.tags = tags!["label" => label];
         }
 
         self.reroute_responses_to =
@@ -400,8 +402,8 @@ impl Client {
     ) -> Result<Vec<Event>> {
         use irc::proto::command::Numeric::*;
 
-        let label_tag = remove_tag("label", message.tags.as_mut());
-        let batch_tag = remove_tag("batch", message.tags.as_mut());
+        let label_tag = message.tags.remove("label");
+        let batch_tag = message.tags.remove("batch");
 
         let context = parent_context.or_else(|| {
             label_tag
@@ -2086,7 +2088,9 @@ impl Client {
                 return Ok(vec![]);
             }
             Command::TAGMSG(_) => {
-                return Ok(vec![]);
+                return Ok(vec![
+                    Event::Single(message.clone(), self.nickname().to_owned()),
+                ]);
             }
             Command::ACCOUNT(accountname) => {
                 let old_user = ok!(message.user());
@@ -3389,11 +3393,6 @@ impl Batch {
 
 fn generate_label() -> String {
     Posix::now().as_nanos().to_string()
-}
-
-fn remove_tag(key: &str, tags: &mut Vec<irc::proto::Tag>) -> Option<String> {
-    tags.remove(tags.iter().position(|tag| tag.key == key)?)
-        .value
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
